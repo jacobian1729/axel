@@ -73,6 +73,7 @@ static struct option axel_options[] =
 	{ "insecure", 		0,	NULL,	'k' },
 	{ "header",		1,	NULL,	'H' },
 	{ "user-agent",		1,	NULL,	'U' },
+	{ "input",		1,	NULL,	'i' },
 	{ NULL,			0,	NULL,	0 }
 };
 #endif
@@ -83,13 +84,14 @@ static char string[MAX_STRING];
 
 int main( int argc, char *argv[] )
 {
-	char fn[MAX_STRING] = "";
-	int do_search = 0;
+	char fn[MAX_STRING] = "", fn_input[MAX_STRING] = "";
+	FILE *fp_input = NULL;
+	int do_search = 0, num_links = 0, input_file_flag = 0;
 	search_t *search;
 	conf_t conf[1];
 	axel_t *axel;
-	int i, j, cur_head = 0;
-	char *s;
+	int i = 0, j = 0, cur_head = 0, url_processed = 0;
+	char *s = NULL, c_newline;
 
 /* Set up internationalization (i18n) */
 	setlocale( LC_ALL, "" );
@@ -105,10 +107,10 @@ int main( int argc, char *argv[] )
 
 	j = -1;
 	while( 1 )
-	{
+	{/*{{{*/
 		int option;
 
-		option = getopt_long( argc, argv, "s:n:o:S::NqvhVakH:U:", axel_options, NULL );
+		option = getopt_long( argc, argv, "s:n:o:S::NqvhVakH:U:i:", axel_options, NULL );
 		if( option == -1 )
 			break;
 
@@ -176,11 +178,20 @@ int main( int argc, char *argv[] )
 				return( 1 );
 			}
 			break;
+		case 'i':
+			if( !sscanf( optarg, "%s", fn_input ) )
+			{
+				print_help();
+				return( 1 );
+			}
+			input_file_flag = 1;
+			break;
 		default:
 			print_help();
 			return( 1 );
 		}
-	}
+	}/*}}}*/
+	
 	conf->add_header_count = cur_head;
 	if( j > -1 )
 		conf->verbose = j;
@@ -197,8 +208,61 @@ int main( int argc, char *argv[] )
 
 	if( argc - optind == 0 )
 	{
-		print_help();
-		return( 1 );
+		/* 
+		 * the above condition will be satisfied during input file option
+		 * and when there is no url without input file option (which is an error)
+		 * so input_file_flag is required to handle the condition
+		 * 
+		*/
+
+		if (input_file_flag == 0)
+		{
+			print_help();
+			return( 1 );
+		}
+		else
+		{
+			fp_input = fopen( fn_input, "r");
+			if( fp_input == NULL )
+			{
+				printf("File Not found\n");
+				return( 1 );
+			}
+			/* verfication of Links from test file*/
+			while( !feof( fp_input ) )
+			{
+				s = (char *) malloc( MAX_STRING );
+				i = fscanf( fp_input, "%1024[^\n]s", s );
+				c_newline = fgetc( fp_input );
+				if( i == 1)
+				{
+					if( c_newline != '\n' )
+					{
+						printf("URL \"%s\" is too long.\n", s);
+						return( 1 );
+					}
+					else
+						num_links += 1;
+				}
+				else
+				{
+					if( c_newline == '\n' )
+					{
+						printf("Error in reading URL (empty ?)\n" );
+						return( 1 );
+					}
+				}
+				free(s);
+			}
+			
+			/* required to make the original code compatible with input file
+			 * The original code checks if the url is present by comparing
+			 * the values of argc and optind variable.
+			 */
+			argc += 1; 
+
+		}
+			
 	}
 	else if( strcmp( argv[optind], "-" ) == 0 )
 	{
@@ -207,6 +271,7 @@ int main( int argc, char *argv[] )
 			fprintf( stderr, _("Error when trying to read URL (Too long?).\n") );
 			return( 1 );
 		}
+		num_links = 1;
 	}
 	else
 	{
@@ -216,243 +281,258 @@ int main( int argc, char *argv[] )
 			fprintf( stderr, _("Can't handle URLs of length over %d\n" ), MAX_STRING );
 			return( 1 );
 		}
+		num_links = 1;
 	}
+	
+	/* rewinding the input file to beginning*/
+	rewind(fp_input);
 
-	printf( _("Initializing download: %s\n"), s );
-	if( do_search )
+	while( url_processed < num_links )
 	{
-		search = malloc( sizeof( search_t ) * ( conf->search_amount + 1 ) );
-		memset( search, 0, sizeof( search_t ) * ( conf->search_amount + 1 ) );
-		search[0].conf = conf;
-		if( conf->verbose )
-			printf( _("Doing search...\n") );
-		i = search_makelist( search, s );
-		if( i < 0 )
+		if( input_file_flag == 1)
 		{
-			fprintf( stderr, _("File not found\n" ) );
-			return( 1 );
+			s = ( char * ) malloc(MAX_STRING);
+			i = fscanf( fp_input, " %1024[^\n]s", s);
+			c_newline = fgetc( fp_input );
 		}
-		if( conf->verbose )
-			printf( _("Testing speeds, this can take a while...\n") );
-		j = search_getspeeds( search, i );
-		search_sortlist( search, i );
-		if( conf->verbose )
-		{
-			printf( _("%i usable servers found, will use these URLs:\n"), j );
-			j = min( j, conf->search_top );
-			printf( "%-60s %15s\n", "URL", "Speed" );
-			for( i = 0; i < j; i ++ )
-				printf( "%-70.70s %5i\n", search[i].url, search[i].speed );
-			printf( "\n" );
-		}
-		axel = axel_new( conf, j, search );
-		free( search );
-		if( axel->ready == -1 )
-		{
-			print_messages( axel );
-			axel_close( axel );
-			return( 1 );
-		}
-	}
-	else if( argc - optind == 1 )
-	{
-		axel = axel_new( conf, 0, s );
-		if( axel->ready == -1 )
-		{
-			print_messages( axel );
-			axel_close( axel );
-			return( 1 );
-		}
-	}
-	else
-	{
-		search = malloc( sizeof( search_t ) * ( argc - optind ) );
-		memset( search, 0, sizeof( search_t ) * ( argc - optind ) );
-		for( i = 0; i < ( argc - optind ); i ++ )
-			strncpy( search[i].url, argv[optind+i], MAX_STRING );
-		axel = axel_new( conf, argc - optind, search );
-		free( search );
-		if( axel->ready == -1 )
-		{
-			print_messages( axel );
-			axel_close( axel );
-			return( 1 );
-		}
-	}
-	print_messages( axel );
-	if( s != argv[optind] )
-	{
-		free( s );
-	}
 
-	if( *fn )
-	{
-		struct stat buf;
-
-		if( stat( fn, &buf ) == 0 )
+		printf( _("Initializing download: %s\n"), s );
+		if( do_search )
 		{
-			if( S_ISDIR( buf.st_mode ) )
+			search = malloc( sizeof( search_t ) * ( conf->search_amount + 1 ) );
+			memset( search, 0, sizeof( search_t ) * ( conf->search_amount + 1 ) );
+			search[0].conf = conf;
+			if( conf->verbose )
+				printf( _("Doing search...\n") );
+			i = search_makelist( search, s );
+			if( i < 0 )
 			{
-				size_t fnlen = strlen(fn);
-				size_t axelfnlen = strlen(axel->filename);
-
-				if (fnlen + 1 + axelfnlen + 1 > MAX_STRING) {
-					fprintf( stderr, _("Filename too long!\n"));
-					return ( 1 );
-				}
-
-				fn[fnlen] = '/';
-				memcpy(fn+fnlen+1, axel->filename, axelfnlen);
-				fn[fnlen + 1 + axelfnlen] = '\0';
+				fprintf( stderr, _("File not found\n" ) );
+				return( 1 );
+			}
+			if( conf->verbose )
+				printf( _("Testing speeds, this can take a while...\n") );
+			j = search_getspeeds( search, i );
+			search_sortlist( search, i );
+			if( conf->verbose )
+			{
+				printf( _("%i usable servers found, will use these URLs:\n"), j );
+				j = min( j, conf->search_top );
+				printf( "%-60s %15s\n", "URL", "Speed" );
+				for( i = 0; i < j; i ++ )
+					printf( "%-70.70s %5i\n", search[i].url, search[i].speed );
+				printf( "\n" );
+			}
+			axel = axel_new( conf, j, search );
+			free( search );
+			if( axel->ready == -1 )
+			{
+				print_messages( axel );
+				axel_close( axel );
+				return( 1 );
 			}
 		}
-		sprintf( string, "%s.st", fn );
-		if( access( fn, F_OK ) == 0 && access( string, F_OK ) != 0 )
+		else if( argc - optind == 1 )
 		{
-			fprintf( stderr, _("No state file, cannot resume!\n") );
-			return( 1 );
-		}
-		if( access( string, F_OK ) == 0 && access( fn, F_OK ) != 0 )
-		{
-			printf( _("State file found, but no downloaded data. Starting from scratch.\n" ) );
-			unlink( string );
-		}
-		strcpy( axel->filename, fn );
-	}
-	else
-	{
-		/* Local file existence check */
-		i = 0;
-		s = axel->filename + strlen( axel->filename );
-		while( 1 )
-		{
-			sprintf( string, "%s.st", axel->filename );
-			if( access( axel->filename, F_OK ) == 0 )
+			axel = axel_new( conf, 0, s );
+			if( axel->ready == -1 )
 			{
-				if( axel->conn[0].supported )
-				{
-					if( access( string, F_OK ) == 0 )
-						break;
-				}
+				print_messages( axel );
+				axel_close( axel );
+				return( 1 );
 			}
-			else
-			{
-				if( access( string, F_OK ) )
-					break;
-			}
-			sprintf( s, ".%i", i );
-			i ++;
-		}
-	}
-
-	if( !axel_open( axel ) )
-	{
-		print_messages( axel );
-		return( 1 );
-	}
-	print_messages( axel );
-	axel_start( axel );
-	print_messages( axel );
-
-	if( conf->alternate_output )
-	{
-		putchar('\n');
-	} 
-	else
-	{
-		if( axel->bytes_done > 0 )	/* Print first dots if resuming */
-		{
-			putchar( '\n' );
-			print_commas( axel->bytes_done );
-		}
-	}
-	axel->start_byte = axel->bytes_done;
-
-	/* Install save_state signal handler for resuming support */
-	signal( SIGINT, stop );
-	signal( SIGTERM, stop );
-
-	while( !axel->ready && run )
-	{
-		long long int prev, done;
-
-		prev = axel->bytes_done;
-		axel_do( axel );
-
-		if( conf->alternate_output )
-		{
-			if( !axel->message && prev != axel->bytes_done )
-				print_alternate_output( axel );
 		}
 		else
 		{
-			/* The infamous wget-like 'interface'.. ;) */
-			done = ( axel->bytes_done / 1024 ) - ( prev / 1024 );
-			if( done && conf->verbose > -1 )
+			search = malloc( sizeof( search_t ) * ( argc - optind ) );
+			memset( search, 0, sizeof( search_t ) * ( argc - optind ) );
+			for( i = 0; i < ( argc - optind ); i ++ )
+				strncpy( search[i].url, argv[optind+i], MAX_STRING );
+			axel = axel_new( conf, argc - optind, search );
+			free( search );
+			if( axel->ready == -1 )
 			{
-				for( i = 0; i < done; i ++ )
+				print_messages( axel );
+				axel_close( axel );
+				return( 1 );
+			}
+		}
+		print_messages( axel );
+		if( s != argv[optind] )
+		{
+			free( s );
+		}
+
+		if( *fn )
+		{
+			struct stat buf;
+
+			if( stat( fn, &buf ) == 0 )
+			{
+				if( S_ISDIR( buf.st_mode ) )
 				{
-					i += ( prev / 1024 );
-					if( ( i % 50 ) == 0 )
-					{
-						if( prev >= 1024 )
-							printf( "  [%6.1fKB/s]", (double) axel->bytes_per_second / 1024 );
-						if( axel->size < 10240000 )
-							printf( "\n[%3lld%%]  ", min( 100, 102400 * i / axel->size ) );
-						else
-							printf( "\n[%3lld%%]  ", min( 100, i / ( axel->size / 102400 ) ) );
+					size_t fnlen = strlen(fn);
+					size_t axelfnlen = strlen(axel->filename);
+
+					if (fnlen + 1 + axelfnlen + 1 > MAX_STRING) {
+						fprintf( stderr, _("Filename too long!\n"));
+						return ( 1 );
 					}
-					else if( ( i % 10 ) == 0 )
-					{
-						putchar( ' ' );
-					}
-					putchar( '.' );
-					i -= ( prev / 1024 );
+
+					fn[fnlen] = '/';
+					memcpy(fn+fnlen+1, axel->filename, axelfnlen);
+					fn[fnlen + 1 + axelfnlen] = '\0';
 				}
-				fflush( stdout );
+			}
+			sprintf( string, "%s.st", fn );
+			if( access( fn, F_OK ) == 0 && access( string, F_OK ) != 0 )
+			{
+				fprintf( stderr, _("No state file, cannot resume!\n") );
+				return( 1 );
+			}
+			if( access( string, F_OK ) == 0 && access( fn, F_OK ) != 0 )
+			{
+				printf( _("State file found, but no downloaded data. Starting from scratch.\n" ) );
+				unlink( string );
+			}
+			strcpy( axel->filename, fn );
+		}
+		else
+		{
+			/* Local file existence check */
+			i = 0;
+			s = axel->filename + strlen( axel->filename );
+			while( 1 )
+			{
+				sprintf( string, "%s.st", axel->filename );
+				if( access( axel->filename, F_OK ) == 0 )
+				{
+					if( axel->conn[0].supported )
+					{
+						if( access( string, F_OK ) == 0 )
+							break;
+					}
+				}
+				else
+				{
+					if( access( string, F_OK ) )
+						break;
+				}
+				sprintf( s, ".%i", i );
+				i ++;
 			}
 		}
 
-		if( axel->message )
+		if( !axel_open( axel ) )
 		{
-			if(conf->alternate_output==1)
+			print_messages( axel );
+			return( 1 );
+		}
+		print_messages( axel );
+		axel_start( axel );
+		print_messages( axel );
+
+		if( conf->alternate_output )
+		{
+			putchar('\n');
+		} 
+		else
+		{
+			if( axel->bytes_done > 0 )	/* Print first dots if resuming */
 			{
-				/* clreol-simulation */
-				putchar( '\r' );
-				for( i = get_term_width(); i > 0; i--)
-					putchar( ' ' );
-				putchar( '\r' );
+				putchar( '\n' );
+				print_commas( axel->bytes_done );
+			}
+		}
+		axel->start_byte = axel->bytes_done;
+
+		/* Install save_state signal handler for resuming support */
+		signal( SIGINT, stop );
+		signal( SIGTERM, stop );
+
+		while( !axel->ready && run )
+		{
+			long long int prev, done;
+
+			prev = axel->bytes_done;
+			axel_do( axel );
+
+			if( conf->alternate_output )
+			{
+				if( !axel->message && prev != axel->bytes_done )
+					print_alternate_output( axel );
 			}
 			else
 			{
+				/* The infamous wget-like 'interface'.. ;) */
+				done = ( axel->bytes_done / 1024 ) - ( prev / 1024 );
+				if( done && conf->verbose > -1 )
+				{
+					for( i = 0; i < done; i ++ )
+					{
+						i += ( prev / 1024 );
+						if( ( i % 50 ) == 0 )
+						{
+							if( prev >= 1024 )
+								printf( "  [%6.1fKB/s]", (double) axel->bytes_per_second / 1024 );
+							if( axel->size < 10240000 )
+								printf( "\n[%3lld%%]  ", min( 100, 102400 * i / axel->size ) );
+							else
+								printf( "\n[%3lld%%]  ", min( 100, i / ( axel->size / 102400 ) ) );
+						}
+						else if( ( i % 10 ) == 0 )
+						{
+							putchar( ' ' );
+						}
+						putchar( '.' );
+						i -= ( prev / 1024 );
+					}
+					fflush( stdout );
+				}
+			}
+
+			if( axel->message )
+			{
+				if(conf->alternate_output==1)
+				{
+					/* clreol-simulation */
+					putchar( '\r' );
+					for( i = get_term_width(); i > 0; i--)
+						putchar( ' ' );
+					putchar( '\r' );
+				}
+				else
+				{
+					putchar( '\n' );
+				}
+				print_messages( axel );
+				if( !axel->ready )
+				{
+					if(conf->alternate_output!=1)
+						print_commas( axel->bytes_done );
+					else
+						print_alternate_output(axel);
+				}
+			}
+			else if( axel->ready )
+			{
 				putchar( '\n' );
 			}
-			print_messages( axel );
-			if( !axel->ready )
-			{
-				if(conf->alternate_output!=1)
-					print_commas( axel->bytes_done );
-				else
-					print_alternate_output(axel);
-			}
 		}
-		else if( axel->ready )
-		{
-			putchar( '\n' );
-		}
+
+		strcpy( string + MAX_STRING / 2,
+			size_human( axel->bytes_done - axel->start_byte ) );
+
+		printf( _("\nDownloaded %s in %s. (%.2f KB/s)\n"),
+			string + MAX_STRING / 2,
+			time_human( gettime() - axel->start_time ),
+			(double) axel->bytes_per_second / 1024 );
+
+		i = axel->ready ? 0 : 2;
+
+		axel_close( axel );
+		url_processed += 1;
 	}
-
-	strcpy( string + MAX_STRING / 2,
-		size_human( axel->bytes_done - axel->start_byte ) );
-
-	printf( _("\nDownloaded %s in %s. (%.2f KB/s)\n"),
-		string + MAX_STRING / 2,
-		time_human( gettime() - axel->start_time ),
-		(double) axel->bytes_per_second / 1024 );
-
-	i = axel->ready ? 0 : 2;
-
-	axel_close( axel );
 
 	return( i );
 }
@@ -583,6 +663,7 @@ void print_help()
 		"-s x\tSpecify maximum speed (bytes per second)\n"
 		"-n x\tSpecify maximum number of connections\n"
 		"-o f\tSpecify local output file\n"
+		"-i f\tSpecify input text file with links\n"
 		"-S [x]\tSearch for mirrors and download from x servers\n"
 		"-H x\tAdd header string\n"
 		"-U x\tSet user agent\n"
@@ -601,6 +682,7 @@ void print_help()
 		"--max-speed=x\t\t-s x\tSpecify maximum speed (bytes per second)\n"
 		"--num-connections=x\t-n x\tSpecify maximum number of connections\n"
 		"--output=f\t\t-o f\tSpecify local output file\n"
+		"--input=f\t\t-i f\tSpecify input text file with links\n"
 		"--search[=x]\t\t-S [x]\tSearch for mirrors and download from x servers\n"
 		"--header=x\t\t-H x\tAdd header string\n"
 		"--user-agent=x\t\t-U x\tSet user agent\n"
